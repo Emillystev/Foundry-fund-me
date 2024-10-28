@@ -1,0 +1,134 @@
+//SPDX-License-Identifier: MIT
+
+pragma solidity ^0.8.18;
+
+import {Test} from "forge-std/Test.sol";
+import {FundMe} from "../../src/FundMe.sol";
+import {DeployFundMe} from "../../script/DeployFundMe.s.sol";
+
+contract FundMeTest is Test {
+    FundMe fundMe;
+
+    address USER = makeAddr("user"); // fake user
+    uint256 constant SEND_VALUE = 0.2 ether;
+    uint256 constant STARTING_BALANCE = 10 ether;
+    uint256 constant GAS_PRICE = 1;
+
+    function setUp() external {
+        // fundMe = new FundMe(); .. us -> FundMeTest -> FundMe, so the owner of FundMe is FundMeTest contract address, not us
+        DeployFundMe deployFundMe = new DeployFundMe();
+        fundMe = deployFundMe.run();
+        vm.deal(USER, STARTING_BALANCE); // set balance to fake user, bc this user is calling fundMe contract and it gotta has at least minimumUsd value
+    }
+
+    function testMinimumDollarIsFive() public view {
+        assertEq(fundMe.MINIMUM_USD(), 5e18);
+    }
+
+    function testOwnerIsMsgSender() public view {
+        assertEq(fundMe.getOwner(), msg.sender);
+    }
+
+    function testPriceFeedVersion() public view {
+        uint256 version = fundMe.getVersion();
+        assertEq(version, 4);
+    }
+
+    function testFundFailsWithoutEnoughETH() public {
+        vm.expectRevert(FundMe.FundMe__NotEnoughEth.selector); // this fails if the code after that doesnt fail
+        fundMe.fund(); // this line fails, bc minimumusd, minimum value must be 5 dollars
+    } // so this test is successed, bc second line failed
+
+    function testFundMeIsSuccesfulIfEnoughEth() public {
+        fundMe.fund{value: SEND_VALUE}();
+    }
+
+    function testFundUpdatesFundedDataStructure() public {
+        vm.prank(USER); // the next transaction will be sent by user
+        fundMe.fund{value: SEND_VALUE}();
+        uint256 amountFunded = fundMe.getAddresToAmountFunded(USER);
+        assertEq(amountFunded, SEND_VALUE);
+    }
+
+    modifier funded() {
+        vm.prank(USER);
+        fundMe.fund{value: SEND_VALUE}();
+        _;
+    }
+
+    function testAddsFundersToArrayOfFunders() public funded {
+        address funder = fundMe.getFunder(0);
+        assertEq(funder, USER);
+    }
+
+    function testOnlyOwnerWithdraw() public funded {
+        vm.expectRevert(FundMe.FundMe__NotOwner.selector);
+        fundMe.withdraw(); // user is not the owner so it will fail  (by modifier, it only withdraws to the owner)
+    }
+
+    function testWithdrawWithASingleFunder() public funded {
+        // Arrange
+        uint256 startingOwnerBalance = fundMe.getOwner().balance;
+        uint256 startingFundMeBalance = address(fundMe).balance;
+        // Act
+        vm.txGasPrice(GAS_PRICE); // sets the gasprice for the rest of the transaction, pretends to use real gas transaction
+        //uint256 gasStart = gasleft(); // gasleft() tells us how much gas is left in our transaction. for example 1000 gas
+
+        vm.startPrank(fundMe.getOwner()); // cost was 200 gas
+        fundMe.withdraw();
+        vm.stopPrank();
+
+        //uint256 gasEnd = gasleft(); // how much gas we use. 1000 - 200 = 800 gas
+        //uint256 gasUsed = (gasStart - gasEnd) * tx.gasprice; // tx.gasprice - built in solidity which tells us the current gas price
+        //Assert
+
+        uint256 endingOwnerBalance = fundMe.getOwner().balance;
+        uint256 endingFundMeBalance = address(fundMe).balance;
+        assertEq(endingFundMeBalance, 0);
+        assertEq(startingFundMeBalance + startingOwnerBalance, endingOwnerBalance);
+    }
+
+    function testWithdrawFromMultipleFunders() public funded {
+        // Arrange
+        uint160 numberOfFunders = 10;
+        uint160 startingFunderIndex = 1;
+        for (uint160 i = startingFunderIndex; i < numberOfFunders; i++) {
+            hoax(address(i), SEND_VALUE); // sets up a prank from an address that has some ether (prank and deal combined)
+            fundMe.fund{value: SEND_VALUE}();
+        }
+
+        uint256 startingOwnerBalance = fundMe.getOwner().balance;
+        uint256 startingFundMeBalance = address(fundMe).balance;
+
+        // Act
+        vm.startPrank(fundMe.getOwner()); // anything between start-stopPrank is going to be sent pretended to be by fundMe.getOwner() address
+        fundMe.withdraw();
+        vm.stopPrank();
+
+        // Assert
+        assert(address(fundMe).balance == 0);
+        assert(startingFundMeBalance + startingOwnerBalance == fundMe.getOwner().balance);
+    }
+
+    function testCheaperWithdrawFromMultipleFunders() public funded {
+        // Arrange
+        uint160 numberOfFunders = 10;
+        uint160 startingFunderIndex = 1;
+        for (uint160 i = startingFunderIndex; i < numberOfFunders; i++) {
+            hoax(address(i), SEND_VALUE);
+            fundMe.fund{value: SEND_VALUE}();
+        }
+
+        uint256 startingOwnerBalance = fundMe.getOwner().balance;
+        uint256 startingFundMeBalance = address(fundMe).balance;
+
+        // Act
+        vm.startPrank(fundMe.getOwner());
+        fundMe.cheaperWithdraw();
+        vm.stopPrank();
+
+        // Assert
+        assert(address(fundMe).balance == 0);
+        assert(startingFundMeBalance + startingOwnerBalance == fundMe.getOwner().balance);
+    }
+}
